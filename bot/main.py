@@ -1,123 +1,79 @@
-# bot/main.py
 import os
-import math
-import logging
 import sys
-from discord.ext import commands
+import logging
 import discord
+from discord.ext import commands
 
 # ======================================================
-# AXIS BOT — Trigonometry Calculator (GitHub Secrets version)
+# AXIS BOT — Main Entrypoint
 # ======================================================
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("axisbot")
 
-# Retrieve bot token from environment (set by GitHub Actions secret or otherwise)
-# - In GitHub Actions workflow we will set env: DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
-TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN") or os.getenv("BOT_TOKEN")
+# ======================================================
+# Token & Intents
+# ======================================================
+TOKEN = (
+    os.getenv("DISCORD_TOKEN")
+    or os.getenv("DISCORD_BOT_TOKEN")
+    or os.getenv("BOT_TOKEN")
+)
 
-# Verify token presence (fail early with helpful message)
 if not TOKEN:
-    # If running in CI, provide additional hint
-    running_in_actions = os.getenv("GITHUB_ACTIONS") == "true"
-    if running_in_actions:
-        logger.error("❌ DISCORD_TOKEN is not set! In GitHub Actions, make sure to map the secret to env:")
-        logger.error("   env: DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}")
-    else:
-        logger.error("❌ DISCORD_TOKEN environment variable is not set. Set it in your environment or CI secrets.")
-    raise SystemExit("Missing DISCORD_TOKEN environment variable.")
+    logger.error("❌ Discord token not set. Define DISCORD_TOKEN in your environment or GitHub Secrets.")
+    sys.exit(1)
 
-# Create Discord intents
+# Default intents are fine for slash-command bots
 intents = discord.Intents.default()
-# your bot needs message content to handle slash commands input or older prefix commands
-# Only enable what you actually need:
-intents.message_content = True
 
-# Create bot instance
+# ======================================================
+# Bot Setup
+# ======================================================
 bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
-# Store per-user mode (degrees or radians)
-user_modes = {}
 
-# ======================================================
-# Utility Functions
-# ======================================================
-def calculate_trig(func, angle, mode):
-    """Calculate trig function result based on user mode."""
-    if mode == "degrees":
-        angle = math.radians(angle)
-    value = func(angle)
-    # handle floating point near-zero
-    if abs(value) < 1e-12:
-        value = 0.0
-    return round(value, 6)
-
-# ======================================================
-# Slash Commands
-# ======================================================
-@bot.tree.command(name="mode", description="Switch between degrees and radians.")
-async def mode(interaction: discord.Interaction, type: str):
-    type = type.lower()
-    if type not in ["degrees", "radians"]:
-        await interaction.response.send_message("❌ Mode must be 'degrees' or 'radians'.", ephemeral=True)
-        return
-
-    user_modes[interaction.user.id] = type
-    await interaction.response.send_message(f"✅ Mode set to **{type}** for you.")
-
-@bot.tree.command(name="sin", description="Calculate sine of an angle.")
-async def sin_cmd(interaction: discord.Interaction, angle: float):
-    mode = user_modes.get(interaction.user.id, "degrees")
-    result = calculate_trig(math.sin, angle, mode)
-    await interaction.response.send_message(f"🧮 sin({angle} {mode}) = **{result}**")
-
-@bot.tree.command(name="cos", description="Calculate cosine of an angle.")
-async def cos_cmd(interaction: discord.Interaction, angle: float):
-    mode = user_modes.get(interaction.user.id, "degrees")
-    result = calculate_trig(math.cos, angle, mode)
-    await interaction.response.send_message(f"🧮 cos({angle} {mode}) = **{result}**")
-
-@bot.tree.command(name="tan", description="Calculate tangent of an angle.")
-async def tan_cmd(interaction: discord.Interaction, angle: float):
-    mode = user_modes.get(interaction.user.id, "degrees")
-    # check for angles where tangent is problematic for degrees-mode
-    if mode == "degrees" and (angle % 180) == 90:
-        await interaction.response.send_message("❌ tan is undefined at this angle.")
-        return
-    result = calculate_trig(math.tan, angle, mode)
-    await interaction.response.send_message(f"🧮 tan({angle} {mode}) = **{result}**")
-
-# ======================================================
-# Events
-# ======================================================
 @bot.event
 async def on_ready():
+    """Log startup info and sync slash commands."""
     logger.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+
+    # Sync slash commands once at startup
     try:
-        await bot.tree.sync()
-        logger.info("✅ Slash commands synced and ready.")
+        synced = await bot.tree.sync()
+        logger.info(f"✅ Synced {len(synced)} slash commands.")
     except Exception as e:
-        logger.warning(f"Could not sync command tree: {e}")
-    print(f"✅ {bot.user} is now online and ready!")
+        logger.warning(f"⚠️ Could not sync slash commands: {e}")
+
+    logger.info("🎯 AxisBot is now online and ready!")
+
+
+async def load_cogs():
+    """Dynamically load all Cogs in the bot/cogs directory."""
+    for filename in os.listdir(os.path.join(os.path.dirname(__file__), "cogs")):
+        if filename.endswith(".py") and not filename.startswith("_"):
+            cog_name = f"bot.cogs.{filename[:-3]}"
+            try:
+                await bot.load_extension(cog_name)
+                logger.info(f"🔹 Loaded Cog: {cog_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to load Cog {cog_name}: {e}")
+
 
 # ======================================================
-# Run the Bot
+# Entrypoint
 # ======================================================
 if __name__ == "__main__":
     try:
+        bot.loop.run_until_complete(load_cogs())
         bot.run(TOKEN)
     except discord.errors.LoginFailure:
         logger.error("❌ Invalid Discord token! Check your GitHub Secret DISCORD_TOKEN.")
         sys.exit(1)
-    except discord.errors.PrivilegedIntentsRequired as e:
-        logger.error("❌ Privileged intents required but not enabled for this bot.")
-        logger.error("   Enable the required intents (Message Content / Server Members / Presence) in the")
-        logger.error("   Discord Developer Portal -> Applications -> Your App -> Bot -> Privileged Gateway Intents.")
-        logger.error("   Alternatively, disable these intents in your code if you do not need them.")
-        logger.error(f"   Full error: {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.exception("Bot terminated with an unexpected exception.")
+    except Exception:
+        logger.exception("💥 Unexpected error running the bot.")
         sys.exit(1)
