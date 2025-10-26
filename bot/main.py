@@ -1,21 +1,22 @@
 # trigonometry-bot/bot/main.py
 """
-Main entrypoint for AxisBot (Trigonometry / Unit Circle)
+AxisBot main entrypoint — modern, robust, diagnostic-friendly.
 
-- Loads commands from `commands/trig.py` (expects an async `setup(bot)` in that module)
-- Supports prefix "?" (e.g. ?sin 30) AND slash commands (/sin 30)
-- Dynamic cog loading, DEV_GUILD_ID for fast command sync
-- Minimal privileged intents by default; message_content is optional via env
-- Uses modern discord.py setup_hook pattern
+- Loads commands from `commands.trig` (expects `async def setup(bot)` in that module).
+- Supports both slash commands (recommended) and prefix commands using '?'.
+- Provides explicit warnings when Message Content Intent is not enabled (required for prefix commands).
+- Read env vars:
+    DISCORD_TOKEN           - required
+    DEV_GUILD_ID            - optional (use for fast guild-scoped slash command sync)
+    ENABLE_MESSAGE_CONTENT  - optional ("true"/"1"/"yes" to enable message_content intent)
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import sys
-import logging
-import asyncio
-from pathlib import Path
 from typing import Optional
 
 import discord
@@ -32,77 +33,78 @@ logging.basicConfig(
 logger = logging.getLogger("axisbot")
 
 # ---------------------------
-# Configuration (via env)
+# Environment / Configuration
 # ---------------------------
-# Primary token environment variable (map your GitHub secret to this)
 TOKEN = (
     os.getenv("DISCORD_TOKEN")
     or os.getenv("DISCORD_BOT_TOKEN")
     or os.getenv("BOT_TOKEN")
 )
 
-# Optional development guild ID to speed up slash command registration
-DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # example: "123456789012345678"
-
-# Allow enabling message_content intent (use only if you actually need prefix/message reading)
+DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")  # optional: for fast guild-scoped slash sync
 ENABLE_MESSAGE_CONTENT = os.getenv("ENABLE_MESSAGE_CONTENT", "false").lower() in ("1", "true", "yes")
-
-# Folder where commands live (module path will be 'commands.<name>')
-COMMANDS_MODULE = "commands"  # we will load commands.trig as commands.trig
 
 # ---------------------------
 # Sanity checks
 # ---------------------------
 if not TOKEN:
     logger.error("❌ DISCORD_TOKEN is not set. Add it to your environment or GitHub Secrets.")
-    logger.error("   In GitHub Actions workflow example: env: DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}")
+    logger.error("   Example (GitHub Actions): env: DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}")
     sys.exit(2)
+
+# ---------------------------
+# PyNaCl check (voice warning)
+# ---------------------------
+try:
+    import nacl  # type: ignore
+    PYNACL_AVAILABLE = True
+except Exception:
+    PYNACL_AVAILABLE = False
+    logger.warning("PyNaCl is not installed; voice features will NOT be supported. (pip install PyNaCl)")
 
 # ---------------------------
 # Intents
 # ---------------------------
 intents = discord.Intents.default()
-# For prefix commands that rely on reading messages, message_content must be True.
-# Keep disabled by default for safety; enable only via env var when necessary.
 if ENABLE_MESSAGE_CONTENT:
-    logger.warning("⚠️ ENABLE_MESSAGE_CONTENT is true; enabling message_content intent.")
     intents.message_content = True
+    logger.info("Message content intent will be enabled (ENABLE_MESSAGE_CONTENT=true).")
+else:
+    # leave disabled by default for safety; commands will rely on slash commands.
+    intents.message_content = False
+    logger.info("Message content intent is disabled (default). Prefix commands (e.g. ?sin) require it.")
 
 # ---------------------------
-# Bot subclass
+# Bot subclass (modern pattern)
 # ---------------------------
 class AxisBot(commands.Bot):
-    def __init__(self, *, intents: discord.Intents, command_prefix: Optional[str] = "?"):
-        # Accept commands when mentioned OR `?` prefix (so both @Bot sin and ?sin work)
-        prefix_resolver = commands.when_mentioned_or("?")
-        super().__init__(command_prefix=prefix_resolver, intents=intents, help_command=None)
-        # shared store accessible to cogs (per-user mode, etc.)
+    def __init__(self, *, intents: discord.Intents):
+        # Accept when mentioned OR '?' as prefix
+        super().__init__(command_prefix=commands.when_mentioned_or("?"), intents=intents, help_command=None)
         self.shared: dict = {}
-        self.shared.setdefault("user_modes", {})
-        # location of commands module (for dynamic loading)
-        self.commands_module = COMMANDS_MODULE
+        self.shared.setdefault("user_modes", {})  # per-user mode storage
+        self._commands_module = "commands"  # the package where extensions live (commands.trig)
 
     async def setup_hook(self) -> None:
-        """Run before login - load commands module(s) and sync slash commands."""
-        # Load the main commands module (commands.trig)
-        # If you add more modules in `commands/`, expand this loader.
+        """Load extension(s) before connecting and sync slash commands."""
+        # 1) Load the commands.trig extension
+        module_name = f"{self._commands_module}.trig"
         try:
-            module_name = f"{self.commands_module}.trig"
             await self.load_extension(module_name)
-            logger.info(f"🔹 Loaded commands module: {module_name}")
+            logger.info(f"🔹 Loaded extension: {module_name}")
         except Exception as exc:
-            logger.exception(f"❌ Failed loading commands module '{module_name}': {exc}")
+            logger.exception(f"❌ Failed to load extension '{module_name}': {exc}")
 
-        # Sync slash commands. Use DEV_GUILD_ID if present to speed up propagation during dev.
+        # 2) Sync slash commands
         try:
             if DEV_GUILD_ID:
                 try:
                     gid = int(DEV_GUILD_ID)
-                    logger.info(f"Registering slash commands to development guild {gid} (fast sync).")
+                    logger.info(f"Syncing slash commands to dev guild {gid} (fast).")
                     await self.tree.sync(guild=discord.Object(id=gid))
                     logger.info("✅ Guild-scoped slash commands synced.")
                 except ValueError:
-                    logger.warning("DEV_GUILD_ID is not a valid integer; performing global sync instead.")
+                    logger.warning("DEV_GUILD_ID env var is not an integer; falling back to global sync.")
                     synced = await self.tree.sync()
                     logger.info(f"✅ Globally synced {len(synced)} commands.")
             else:
@@ -113,50 +115,70 @@ class AxisBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info(f"✅ Logged in as {self.user} (ID: {self.user.id})")
-        logger.info("🎯 AxisBot ready — commands available via slash and prefix '?'")
+        # Post-startup diagnostic about prefix commands vs message_content intent
+        self._diagnose_prefix_intent()
+
+    def _diagnose_prefix_intent(self) -> None:
+        """Warn if there are prefix commands loaded but message_content intent is disabled."""
+        # Count prefix commands loaded from cogs/commands
+        prefix_command_count = sum(1 for _ in self.walk_commands())  # includes app commands? walk_commands yields prefix commands
+        # More reliable: check presence of any commands.Command objects in bot.commands
+        prefix_present = len(self.commands) > 0
+        if prefix_present and not self.intents.message_content:
+            logger.warning(
+                "⚠️ Privileged message content intent is missing but prefix commands are registered."
+                " Prefix commands (e.g. ?sin) will NOT receive message content from the gateway unless "
+                "the Message Content Intent is enabled in BOTH your code (ENABLE_MESSAGE_CONTENT) and the "
+                "Developer Portal (Applications → Your App → Bot → Privileged Gateway Intents → Message Content)."
+            )
+            logger.info("If you only want slash commands, you can ignore this. Otherwise enable message content intent.")
+
+# ---------------------------
+# Helper: global command error handler
+# ---------------------------
+def attach_global_error_handler(bot: AxisBot) -> None:
+    @bot.event
+    async def on_command_error(ctx, error):
+        # Keep responses helpful and non-verbose for users
+        from discord.ext.commands import CommandNotFound, BadArgument, MissingRequiredArgument
+        if isinstance(error, CommandNotFound):
+            await ctx.send("❌ Unknown command. Try `/sin` or `?sin 30`.")
+        elif isinstance(error, (BadArgument, MissingRequiredArgument)):
+            await ctx.send(f"❌ Bad usage: {error}")
+        else:
+            # Unexpected: log with stack trace and notify channel generically
+            logger.exception(f"Unhandled command error: {error}")
+            try:
+                await ctx.send("❌ An internal error occurred. Check logs.")
+            except Exception:
+                pass
 
 # ---------------------------
 # Entrypoint
 # ---------------------------
 async def main() -> None:
     bot = AxisBot(intents=intents)
+    bot.shared.setdefault("user_modes", {})  # accessible by commands.trig
 
-    # expose shared store for cogs
-    bot.shared.setdefault("user_modes", {})
+    # attach helpful on_command_error for prefix commands
+    attach_global_error_handler(bot)
 
-    # attach basic global error handler for commands (prefix)
-    @bot.event
-    async def on_command_error(ctx, error):
-        # keep user messages helpful and short
-        from discord.ext.commands import CommandNotFound, BadArgument, MissingRequiredArgument
-        if isinstance(error, CommandNotFound):
-            await ctx.send("❌ Unknown command. Try `/sin` or `?sin 30`.")
-        elif isinstance(error, (BadArgument, MissingRequiredArgument)):
-            await ctx.send(f"❌ Bad command usage: {error}")
-        else:
-            logger.exception(f"Unhandled command error: {error}")
-            try:
-                await ctx.send("❌ An unexpected error occurred. Check logs.")
-            except Exception:
-                pass
-
-    # start
     try:
-        # `async with bot` ensures graceful cleanup (cog unloads, shutdown)
+        # Use async context manager for graceful startup/shutdown
         async with bot:
             await bot.start(TOKEN)
-    except KeyboardInterrupt:
-        logger.info("🛑 Keyboard interrupt received. Shutting down.")
     except discord.errors.LoginFailure:
-        logger.error("❌ Invalid Discord token. Verify DISCORD_TOKEN value.")
+        logger.error("❌ Invalid Discord token (LoginFailure). Verify DISCORD_TOKEN value.")
         sys.exit(3)
     except discord.errors.PrivilegedIntentsRequired as exc:
         logger.error("❌ Privileged intents required but not enabled for this bot.")
-        logger.error("   If you need message content, enable it in the Developer Portal or disable message usage in code.")
+        logger.error("   If you need message content, enable the Message Content Intent in the Developer Portal.")
         logger.error(f"   Full error: {exc}")
         sys.exit(4)
+    except KeyboardInterrupt:
+        logger.info("🛑 Keyboard interrupt received; shutting down.")
     except Exception as exc:
-        logger.exception(f"💥 Unexpected error starting bot: {exc}")
+        logger.exception(f"💥 Unexpected error running bot: {exc}")
         sys.exit(5)
 
 if __name__ == "__main__":
